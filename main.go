@@ -6,12 +6,12 @@ package main
 import (
 	"fmt"
 	"log"
+	"mq2influx/pipe"
 	"runtime"
 	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
-	"github.com/gocql/gocql"
 
 	_ "github.com/influxdata/influxdb1-client"
 	client "github.com/influxdata/influxdb1-client/v2"
@@ -19,16 +19,7 @@ import (
 	"github.com/go-redis/redis/v7"
 )
 
-// 장치별 메시지가 도착하는지를 감시
-var checkLaterncy map[string]int64
-
-// 메시지 도착 하는지 감시하는 시간 간격
-var adjustTTL int64
-
-var mux sync.RWMutex
-
-func messageHandler(c mqtt.Client, msg mqtt.Message, session *gocql.Session, influxClient client.Client) {
-
+func messageHandler(msg mqtt.Message, influxClient client.Client) {
 	go influxPut(influxClient, msg.Payload(), msg.Topic())
 }
 
@@ -50,10 +41,7 @@ ERROR1:
 func main() {
 	// 모든 cpu를 다 사용함.
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	// 메시지 도착 간격 감시
-	checkLaterncy = make(map[string]int64)
-	// 감시 간격은 11분
-	adjustTTL = int64(3 * 60)
+	pipe.Print()
 	for {
 		runJob()
 		time.Sleep(600 * time.Second)
@@ -70,16 +58,6 @@ func runJob() {
 			fmt.Println("Recovered in runJob", r)
 		}
 	}()
-
-	// @TODO 컨피그파일로 배출  192.168.100.153     192.168.0.14
-	cluster := gocql.NewCluster("192.168.0.101")
-
-	cluster.Keyspace = "sensordb"
-	session, err := cluster.CreateSession()
-	if err != nil {
-		log.Println(err)
-	}
-	defer session.Close()
 
 	influxClient, err := client.NewHTTPClient(client.HTTPConfig{
 		Addr: "http://192.168.0.101:8086",
@@ -102,7 +80,7 @@ func runJob() {
 		SetClientID("group-one").
 		SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(c, msg, session, influxClient)
+			messageHandler(msg, influxClient)
 		}).
 		SetConnectionLostHandler(connLostHandler)
 
@@ -115,7 +93,7 @@ func runJob() {
 		//you may not receive any message
 		if token := c.Subscribe("cp/#", 0, func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(c, msg, session, influxClient)
+			messageHandler(msg, influxClient)
 		}); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 		}
@@ -129,40 +107,6 @@ func runJob() {
 	if token := c.Connect(); token.Wait() && token.Error() != nil {
 		log.Println(token.Error())
 	}
-
-	go func() {
-		var lateDevices []string
-		var checkPoint int64 //가장 최근의 에러처리 시점.
-		var checkPointBase int64
-
-		// 1분에 한번씩 돌면서...
-		timer := time.NewTicker(60 * time.Second)
-		for range timer.C {
-
-			now := time.Now().Unix()
-			fmt.Println("++++++++++++++++++++++++++++++++++++++++++++++++++")
-			fmt.Println("it's check 클러스터", now)
-			tm := time.Unix(now, 0)
-			fmt.Println(tm.Format("2006-01-02T15:04:05-0700"))
-			fmt.Println("++++++++++++++++++++++++++++++++++++++++++++++++++")
-			mux.RLock()
-			for k, v := range checkLaterncy {
-				fmt.Println(k, "'s value =>", v)
-				vm := time.Unix(v, 0)
-
-				// && v > checkPoint
-				if v < now && v > checkPoint {
-					fmt.Println("late message =>[", k, "] v =>", v, "dat =>", vm.Format("2006-01-02T15:04:05-0700"), "now =>", now)
-					lateDevices = append(lateDevices, k)
-					if checkPointBase < v {
-						checkPointBase = v
-					}
-				}
-			}
-			mux.RUnlock()
-		}
-		wg.Done()
-	}()
 
 	wg.Wait()
 }
