@@ -6,7 +6,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"mq2influx/pipe"
 	"runtime"
 	"sync"
 	"time"
@@ -19,8 +18,9 @@ import (
 	"github.com/go-redis/redis/v7"
 )
 
-func messageHandler(msg mqtt.Message, influxClient client.Client) {
-	go influxPut(influxClient, msg.Payload(), msg.Topic())
+func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *redis.Client, allchan chan<- interface{}) {
+	//fmt.Println(string(msg.Payload()))
+	go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic(), allchan)
 }
 
 func connLostHandler(c mqtt.Client, err error) {
@@ -41,7 +41,7 @@ ERROR1:
 func main() {
 	// 모든 cpu를 다 사용함.
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	pipe.Print()
+
 	for {
 		runJob()
 		time.Sleep(600 * time.Second)
@@ -71,33 +71,51 @@ func runJob() {
 		Addr:     "192.168.0.102:16379",
 		Password: "", // no password set
 		DB:       0,  // use default DB
+
 	})
 	pong, err := redisClient.Ping().Result()
 	log.Println(pong, err)
 
+	value, err := redisClient.HGet("foot", "cairo").Result()
+
+	allchan := make(chan interface{}, 300)
+
+	log.Println(value, err)
 	opts := mqtt.NewClientOptions().
 		AddBroker("tcp://192.168.0.101:1883").
 		SetClientID("group-one").
 		SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(msg, influxClient)
+			messageHandler(msg, influxClient, redisClient, allchan)
 		}).
 		SetConnectionLostHandler(connLostHandler)
 
 	//set OnConnect handler as anonymous function
 	//after connected, subscribe to topic
 	opts.OnConnect = func(c mqtt.Client) {
-		fmt.Printf("Client connected, subscribing to: rmms/*\n")
+		fmt.Printf("Client connected, subscribing to: cp/*\n")
 
 		//Subscribe here, otherwise after connection lost,
 		//you may not receive any message
 		if token := c.Subscribe("cp/#", 0, func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(msg, influxClient)
+			messageHandler(msg, influxClient, redisClient, allchan)
 		}); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 		}
 	}
+
+	go func(allchan <-chan interface{}) {
+		for {
+			if tags, success := <-allchan; success {
+				//fmt.Println("recieved all channel ->", tags.(map[string]interface{}))
+				tags.(map[string]interface{})["t"] = 0
+			} else {
+				break
+			}
+		}
+
+	}(allchan)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
