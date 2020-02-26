@@ -1,5 +1,6 @@
-//mqtt broker에서 데이터를 subscribe하여 influx db에 저장.
+//mqtt broker에서 게이트웨이가 보낸 센서 데이터를 subscribe하여 influx db에 저장.
 //2020.01에 수정하여 LPWA 프로젝트에 맞게 수정함.
+//main.go 와 influx.go
 
 package main
 
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
+	"github.com/sasbury/mini"
 
 	_ "github.com/influxdata/influxdb1-client"
 	client "github.com/influxdata/influxdb1-client/v2"
@@ -38,9 +40,22 @@ ERROR1:
 	fmt.Printf("reconnect!!")
 }
 
+var redisserver string
+var mqttserver string
+var influxdb string
+
 func main() {
 	// 모든 cpu를 다 사용함.
 	runtime.GOMAXPROCS(runtime.NumCPU())
+
+	config, err := mini.LoadConfiguration("mq2influx.ini")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	redisserver = config.String("redisserver", "192.168.0.102:16379")
+	mqttserver = config.String("mqttserver", "tcp://192.168.0.101:1883")
+	influxdb = config.String("influxdb", "http://192.168.0.101:8086")
 
 	for {
 		runJob()
@@ -60,7 +75,7 @@ func runJob() {
 	}()
 
 	influxClient, err := client.NewHTTPClient(client.HTTPConfig{
-		Addr: "http://192.168.0.101:8086",
+		Addr: influxdb,
 	})
 	if err != nil {
 		log.Println(err)
@@ -68,7 +83,7 @@ func runJob() {
 	defer influxClient.Close()
 
 	redisClient := redis.NewClient(&redis.Options{
-		Addr:     "192.168.0.102:16379",
+		Addr:     redisserver,
 		Password: "", // no password set
 		DB:       0,  // use default DB
 
@@ -82,8 +97,8 @@ func runJob() {
 
 	log.Println(value, err)
 	opts := mqtt.NewClientOptions().
-		AddBroker("tcp://192.168.0.101:1883").
-		SetClientID("group-one").
+		AddBroker(mqttserver).
+		SetClientID("group-two").
 		SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
 			messageHandler(msg, influxClient, redisClient, allchan)
@@ -93,11 +108,11 @@ func runJob() {
 	//set OnConnect handler as anonymous function
 	//after connected, subscribe to topic
 	opts.OnConnect = func(c mqtt.Client) {
-		fmt.Printf("Client connected, subscribing to: cp/*\n")
+		fmt.Printf("Client connected, subscribing to: ms/*\n")
 
 		//Subscribe here, otherwise after connection lost,
 		//you may not receive any message
-		if token := c.Subscribe("cp/#", 0, func(c mqtt.Client, msg mqtt.Message) {
+		if token := c.Subscribe("ms/#", 0, func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
 			messageHandler(msg, influxClient, redisClient, allchan)
 		}); token.Wait() && token.Error() != nil {

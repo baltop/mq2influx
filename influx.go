@@ -90,7 +90,8 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 	}
 
 	// mqtt topc에서 siteid를 짤라내서 s로 저장
-	dat["s"] = strings.Split(topic, "/")[1]
+	siteID := strings.Split(topic, "/")[1]
+	dat["s"] = siteID
 
 	// mqtt 메시지의 "i"는 태그로 그외는 필드로 저장
 	equipID := dat["i"].(string)
@@ -106,75 +107,23 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 		tags["k"] = key
 		dat["m"] = curVal
 
-		tempokey, err := redisClient.SMembers(equipID + "_" + key).Result()
+		// redis에서 이장치의 모델을 가져온다.
+		modelID, err := redisClient.Get(equipID).Result()
 		if err != nil {
 			fmt.Println(err)
 		}
-		if len(tempokey) > 0 {
-			fmt.Println("limitValue ->", tempokey)
-			for _, tempoValue := range tempokey {
-				limitValue := strings.Split(tempoValue, ",")
-				checkValue, err := strconv.Atoi(limitValue[1])
-				if err != nil {
-					fmt.Println(err)
-				}
-				if limitValue[0] == "ov" { // over
-					if checkValue < curVal {
-						if err = redPublish(redisClient, equipID, key, curVal, tempoValue); err != nil {
-							fmt.Println(err)
-						}
-					}
-				} else { // under
-					if checkValue > curVal {
-						if err = redPublish(redisClient, equipID, key, curVal, tempoValue); err != nil {
-							fmt.Println(err)
-						}
-					}
-				}
-			}
-		}
-
-		// redis에서 i + key로 get 상한값, 하한값
-		// key가 "err" 이면 err code
-
-		// i + key -> maxlmt < value 가 크면 maxlmt_act 를 redis에서 가져옴.
-
-		// value, err := redisClient.HGetAll("foot").Result()
-		// if err != nil {
-		// 	log.Println(err)
-		// }
-		// fmt.Println(value)
-		// fmt.Println(value["cairo"])
-		//fmt.Printf("type is  %T", value["height"])
-
+		fmt.Println("model id is ->[", modelID, "]")
+		// 에러나 범위를 벗어난 값을 미리 설정된 모델의 값과 비교하여 이벤트 처리
+		checkEvent(redisClient, siteID, modelID, key, curVal, equipID)
 		// 여기서는 끝이지만 이벤트 서버에서 위 메시지를 sub하여 관련 처리를 함.
 
-		// 이벤트 서버에서 noti와 command를 처리함.
-
-		// influx에 넣을 데이터 만들기
-
-		// redis pub에 i + key + maxlmt + value 를 보냄
-
 		// i는 for loop index로 같은 시간에 온 데이터를 시간을 달리하기 위해 증가시킴
-		//fmt.Println(tm)
-		//fmt.Println(tm + int64(i))
 		time1 := (tm + int64(i)) * 1000000
-		// fmt.Println(time1)
 		pt, err := client.NewPoint("iotdata5", tags, dat, time.Unix(0, time1))
 		if err != nil {
 			log.Fatal(err)
 		}
 		bp.AddPoint(pt)
-		//fmt.Println("influ ", tags, dat, tm)
-		sendata := make(map[string]interface{})
-		for k, v := range tags {
-			sendata[k] = v
-		}
-		for k, v := range dat {
-			sendata[k] = v
-		}
-		sendata["t"] = tm
-		allchan <- sendata
 
 	}
 	// Write the batch
@@ -182,10 +131,68 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 		log.Fatal(err)
 	}
 
+	// if err := influxClient.Close(); err != nil {
+	// 	log.Fatal(err)
+	// }
 }
 
-func redPublish(redisClient *redis.Client, equipID string, key string, curVal int, tempoValue string) error {
-	ocmd, err := redisClient.Publish("primEvent", equipID+", "+key+", "+strconv.Itoa(curVal)+", "+tempoValue).Result()
+func checkEvent(redisClient *redis.Client, siteID string, modelID string, key string, curVal int, equipID string) {
+	// redis에서 이장치의 모델에 해당하는 ov, un의 설정값을 가져온다.
+	if key == "err" {
+		key = "e"
+	}
+	tempokey, err := redisClient.SMembers(modelID + "_" + key).Result()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	if len(tempokey) == 0 {
+		return
+	}
+
+	fmt.Println("limitValue ->", tempokey)
+
+	// 설정값이 있으면
+	if key == "e" { // err
+		for _, tempoValue := range tempokey {
+			limitValue := strings.Split(tempoValue, ",")
+			checkValue, err := strconv.Atoi(limitValue[0])
+			if err != nil {
+				fmt.Println(err)
+			}
+			if curVal == checkValue {
+				tempoValue = "err," + tempoValue
+				if err = redPublish(redisClient, siteID, modelID, equipID, key, curVal, tempoValue); err != nil {
+					fmt.Println(err)
+				}
+			}
+		}
+	} else { // ov or un
+		for _, tempoValue := range tempokey {
+			limitValue := strings.Split(tempoValue, ",")
+			checkValue, err := strconv.Atoi(limitValue[1])
+			if err != nil {
+				fmt.Println(err)
+			}
+			if limitValue[0] == "ov" { // over
+				if checkValue < curVal { // 비교해서 넘치면 레디스에 publish함.
+					if err = redPublish(redisClient, siteID, modelID, equipID, key, curVal, tempoValue); err != nil {
+						fmt.Println(err)
+					}
+				}
+			} else { // under
+				if checkValue > curVal { // 모자란 경우만 레디스에 publish
+					if err = redPublish(redisClient, siteID, modelID, equipID, key, curVal, tempoValue); err != nil {
+						fmt.Println(err)
+					}
+				}
+			}
+		}
+	}
+}
+
+func redPublish(redisClient *redis.Client, siteID string, modelID string, equipID string, key string, curVal int, tempoValue string) error {
+	ocmd, err := redisClient.Publish("primEvent", siteID+","+modelID+","+equipID+","+key+","+strconv.Itoa(curVal)+","+tempoValue).Result()
 	if err != nil {
 		fmt.Println("reids publish err ->", err, ocmd)
 		return err
