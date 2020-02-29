@@ -64,6 +64,13 @@ const (
 
 //Put is saves points to database
 func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte, topic string, allchan chan<- interface{}) {
+	// panic 발생시 리커버하고 메인으로 돌아감.
+	defer func() {
+		fmt.Println("runJob defer function called.")
+		if r := recover(); r != nil {
+			fmt.Println("Recovered in runJob", r)
+		}
+	}()
 
 	// Create a new point batch
 	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
@@ -80,7 +87,10 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 	}
 
 	// msr에서 해당하는 부분만 다른 map(sel)으로
-	sel := dat["m"].(map[string]interface{})
+	sel, ok := dat["m"].(map[string]interface{})
+	if ok == false {
+		return
+	}
 	keys := make([]string, len(sel))
 	// msr의 키부분을 추출
 	i := 0
@@ -94,9 +104,16 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 	dat["s"] = siteID
 
 	// mqtt 메시지의 "i"는 태그로 그외는 필드로 저장
-	equipID := dat["i"].(string)
+	equipID, ok := dat["i"].(string)
+	if ok == false {
+		return
+	}
 	tags := map[string]string{"i": equipID}
-	tm := int64(dat["t"].(float64))
+	temptm, ok := dat["t"].(float64)
+	if ok == false {
+		return
+	}
+	tm := int64(temptm)
 	delete(dat, "m")
 	delete(dat, "i")
 	delete(dat, "t")
@@ -130,7 +147,7 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 	if err := influxClient.Write(bp); err != nil {
 		log.Fatal(err)
 	}
-
+	// close하면 에러 발생하네...
 	// if err := influxClient.Close(); err != nil {
 	// 	log.Fatal(err)
 	// }
