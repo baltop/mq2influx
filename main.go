@@ -20,29 +20,13 @@ import (
 	"github.com/go-redis/redis/v7"
 )
 
-func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *redis.Client, allchan chan<- interface{}) {
-	//fmt.Println(string(msg.Payload()))
-	go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic(), allchan)
-}
-
-func connLostHandler(c mqtt.Client, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("Recovered in connLostHandler", r)
-		}
-	}()
-	fmt.Printf("Connection lost, reason: %v\n", err)
-ERROR1:
-	if token := c.Connect(); token.Wait() && token.Error() != nil {
-		time.Sleep(20 * time.Second)
-		goto ERROR1
-	}
-	fmt.Printf("reconnect!!")
-}
-
 var redisserver string
 var mqttserver string
 var influxdb string
+
+func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *redis.Client) {
+	go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
+}
 
 func main() {
 	// 모든 cpu를 다 사용함.
@@ -78,30 +62,29 @@ func runJob() {
 		Addr: influxdb,
 	})
 	if err != nil {
-		log.Println(err)
+		log.Fatal(err)
 	}
 	defer influxClient.Close()
+	println("influx connected")
 
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     redisserver,
-		Password: "", // no password set
-		DB:       0,  // use default DB
-
+		Password: "",
+		DB:       0,
 	})
 	pong, err := redisClient.Ping().Result()
-	log.Println(pong, err)
+	fmt.Println("redis connection start status", pong)
+	if err != nil {
+		log.Fatal(err)
+	}
+	println("redis connected")
 
-	value, err := redisClient.HGet("foot", "cairo").Result()
-
-	allchan := make(chan interface{}, 300)
-
-	log.Println(value, err)
 	opts := mqtt.NewClientOptions().
 		AddBroker(mqttserver).
 		SetClientID("group-two").
 		SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(msg, influxClient, redisClient, allchan)
+			messageHandler(msg, influxClient, redisClient)
 		}).
 		SetConnectionLostHandler(connLostHandler)
 
@@ -114,23 +97,11 @@ func runJob() {
 		//you may not receive any message
 		if token := c.Subscribe("ms/#", 0, func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(msg, influxClient, redisClient, allchan)
+			messageHandler(msg, influxClient, redisClient)
 		}); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 		}
 	}
-
-	go func(allchan <-chan interface{}) {
-		for {
-			if tags, success := <-allchan; success {
-				//fmt.Println("recieved all channel ->", tags.(map[string]interface{}))
-				tags.(map[string]interface{})["t"] = 0
-			} else {
-				break
-			}
-		}
-
-	}(allchan)
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -142,4 +113,19 @@ func runJob() {
 	}
 
 	wg.Wait()
+}
+
+func connLostHandler(c mqtt.Client, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("Recovered in connLostHandler", r)
+		}
+	}()
+	fmt.Printf("Connection lost, reason: %v\n", err)
+ERROR1:
+	if token := c.Connect(); token.Wait() && token.Error() != nil {
+		time.Sleep(20 * time.Second)
+		goto ERROR1
+	}
+	fmt.Printf("reconnect!!")
 }

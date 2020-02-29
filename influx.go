@@ -17,60 +17,10 @@ import (
 	client "github.com/influxdata/influxdb1-client/v2"
 )
 
-const (
-	// MyDB specifies name of database
-	MyDB = "mydb"
-)
-
-// Insert saves points to database
-// func Insert(productMeasurement map[string]interface{}) {
-// 	c, err := client.NewHTTPClient(client.HTTPConfig{
-// 		Addr: "http://192.168.0.1:8086",
-// 	})
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-// 	defer c.Close()
-
-// 	// Create a new point batch
-// 	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
-// 		Database:  MyDB,
-// 		Precision: "s",
-// 	})
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-
-// 	// Create a point and add to batch
-// 	tags := map[string]string{"productView": productMeasurement["ProductName"].(string)}
-// 	fields := productMeasurement
-
-// 	pt, err := client.NewPoint("products", tags, fields, time.Now())
-// 	if err != nil {
-// 		log.Fatal(err)
-// 	}
-// 	bp.AddPoint(pt)
-
-// 	// Write the batch
-// 	if err := c.Write(bp); err != nil {
-// 		log.Fatal(err)
-// 	}
-
-// 	// Close client resources
-// 	if err := c.Close(); err != nil {
-// 		log.Fatal(err)
-// 	}
-// }
+const MyDB = "mydb"
 
 //Put is saves points to database
-func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte, topic string, allchan chan<- interface{}) {
-	// panic 발생시 리커버하고 메인으로 돌아감.
-	defer func() {
-		fmt.Println("runJob defer function called.")
-		if r := recover(); r != nil {
-			fmt.Println("Recovered in runJob", r)
-		}
-	}()
+func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte, topic string) {
 
 	// Create a new point batch
 	bp, err := client.NewBatchPoints(client.BatchPointsConfig{
@@ -83,20 +33,19 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 
 	var dat map[string]interface{}
 	if err := json.Unmarshal(msg, &dat); err != nil {
-		panic(err)
+		log.Println("json unmarshall error : ", err)
 	}
 
-	// msr에서 해당하는 부분만 다른 map(sel)으로
-	sel, ok := dat["m"].(map[string]interface{})
-	if ok == false {
+	// "m" 에 해당하는 부분만 다른 map(sel)으로
+	mSubMap, ok := dat["m"].(map[string]interface{})
+	if !ok {
+		fmt.Println("m in jsonMap notfound")
 		return
 	}
-	keys := make([]string, len(sel))
-	// msr의 키부분을 추출
-	i := 0
-	for k := range sel {
-		keys[i] = k
-		i++
+	keys := make([]string, 0, len(mSubMap))
+	// "m" 의 key 부분을 추출
+	for k := range mSubMap {
+		keys = append(keys, k)
 	}
 
 	// mqtt topc에서 siteid를 짤라내서 s로 저장
@@ -105,12 +54,14 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 
 	// mqtt 메시지의 "i"는 태그로 그외는 필드로 저장
 	equipID, ok := dat["i"].(string)
-	if ok == false {
+	if !ok {
+		fmt.Println("i in dat notfound")
 		return
 	}
 	tags := map[string]string{"i": equipID}
 	temptm, ok := dat["t"].(float64)
-	if ok == false {
+	if !ok {
+		fmt.Println("t in dat notfound")
 		return
 	}
 	tm := int64(temptm)
@@ -118,7 +69,7 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 	delete(dat, "i")
 	delete(dat, "t")
 	for i, key := range keys {
-		val := sel[key]
+		val := mSubMap[key]
 
 		curVal := int(val.(float64))
 		tags["k"] = key
@@ -127,12 +78,14 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 		// redis에서 이장치의 모델을 가져온다.
 		modelID, err := redisClient.Get(equipID).Result()
 		if err != nil {
-			fmt.Println(err)
+			log.Println(err)
 		}
 		fmt.Println("model id is ->[", modelID, "]")
-		// 에러나 범위를 벗어난 값을 미리 설정된 모델의 값과 비교하여 이벤트 처리
-		checkEvent(redisClient, siteID, modelID, key, curVal, equipID)
-		// 여기서는 끝이지만 이벤트 서버에서 위 메시지를 sub하여 관련 처리를 함.
+		if modelID != "" {
+			// 에러나 범위를 벗어난 값을 미리 설정된 모델의 값과 비교하여 이벤트 처리
+			checkEvent(redisClient, siteID, modelID, key, curVal, equipID)
+			// 여기서는 끝이지만 이벤트 서버에서 위 메시지를 sub하여 관련 처리를 함.
+		}
 
 		// i는 for loop index로 같은 시간에 온 데이터를 시간을 달리하기 위해 증가시킴
 		time1 := (tm + int64(i)) * 1000000
@@ -141,18 +94,14 @@ func influxPut(influxClient client.Client, redisClient *redis.Client, msg []byte
 			log.Fatal(err)
 		}
 		bp.AddPoint(pt)
-
 	}
 	// Write the batch
 	if err := influxClient.Write(bp); err != nil {
 		log.Fatal(err)
 	}
-	// close하면 에러 발생하네...
-	// if err := influxClient.Close(); err != nil {
-	// 	log.Fatal(err)
-	// }
 }
 
+// redis에서 모델아이디로 에러나 범위체크 값을 가져와서 이벤트 발생 여부를 체크하고 이벤트 발생시 redis에 publish
 func checkEvent(redisClient *redis.Client, siteID string, modelID string, key string, curVal int, equipID string) {
 	// redis에서 이장치의 모델에 해당하는 ov, un의 설정값을 가져온다.
 	if key == "err" {
@@ -216,23 +165,3 @@ func redPublish(redisClient *redis.Client, siteID string, modelID string, equipI
 	}
 	return nil
 }
-
-// queryDB convenience function to query the database
-// func queryDB(cmd string) (res []client.Result, err error) {
-// 	q := client.Query{
-// 		Command:  cmd,
-// 		Database: MyDB,
-// 	}
-// 	c, err := client.NewHTTPClient(client.HTTPConfig{
-// 		Addr: "http://192.168.0.101:8086",
-// 	})
-// 	if response, err := c.Query(q); err == nil {
-// 		if response.Error() != nil {
-// 			return res, response.Error()
-// 		}
-// 		res = response.Results
-// 	} else {
-// 		return res, err
-// 	}
-// 	return res, nil
-// }
