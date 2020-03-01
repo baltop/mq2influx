@@ -10,7 +10,6 @@ import (
 	"log"
 	"runtime"
 	"strings"
-	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -26,18 +25,18 @@ var redisserver string
 var mqttserver string
 var influxdb string
 
+//mqtt로 받은 메시지 payload를 담을 struct
 type mqMessage struct {
 	influxClient client.Client
 	redisClient  *redis.Client
 	Site         string
 	Time         float64            `json:"t"`
 	ID           string             `json:"i"`
-	Mesure       map[string]float64 `json:"m"`
+	Measure      map[string]float64 `json:"m"`
 }
 
 func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *redis.Client) {
 	mqMsg := new(mqMessage)
-
 	if err := json.Unmarshal(msg.Payload(), &mqMsg); err != nil {
 		panic(err)
 	}
@@ -46,7 +45,7 @@ func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *r
 	mqMsg.redisClient = redisClient
 	fmt.Println("message to struct ->", mqMsg)
 
-	//go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
+	influxPut(mqMsg)
 }
 
 func main() {
@@ -64,13 +63,13 @@ func main() {
 
 	for {
 		runJob()
+		// 주로 통신에러일 경우 서버가 재기동할때까지..
 		time.Sleep(600 * time.Second)
 		fmt.Println("restart......")
 	}
 }
 
 func runJob() {
-
 	// panic 발생시 리커버하고 메인으로 돌아감.
 	defer func() {
 		fmt.Println("runJob defer function called.")
@@ -79,6 +78,7 @@ func runJob() {
 		}
 	}()
 
+	// influx client. 매뉴얼에 goroutine에서 사용가능하다고 함.
 	influxClient, err := client.NewHTTPClient(client.HTTPConfig{
 		Addr: influxdb,
 	})
@@ -88,6 +88,7 @@ func runJob() {
 	defer influxClient.Close()
 	println("influx connected")
 
+	// redis client connection pool
 	redisClient := redis.NewClient(&redis.Options{
 		Addr:     redisserver,
 		Password: "",
@@ -100,14 +101,13 @@ func runJob() {
 	}
 	println("redis connected")
 
+	// mqtt 서버 접속 옵션
 	opts := mqtt.NewClientOptions().
 		AddBroker(mqttserver).
 		SetClientID("group-two").
-		SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
-			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			go messageHandler(msg, influxClient, redisClient)
-			//go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
-		}).
+		// SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
+		// 	go messageHandler(msg, influxClient, redisClient)
+		// }).
 		SetConnectionLostHandler(connLostHandler)
 
 	//set OnConnect handler as anonymous function
@@ -120,24 +120,20 @@ func runJob() {
 		if token := c.Subscribe("ms/#", 0, func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
 			go messageHandler(msg, influxClient, redisClient)
-			//go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
+
 		}); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 		}
 	}
-
-	var wg sync.WaitGroup
-	wg.Add(1)
 
 	//create and start a client using the above ClientOptions
 	c := mqtt.NewClient(opts)
 	if token := c.Connect(); token.Wait() && token.Error() != nil {
 		log.Println(token.Error())
 	}
-
-	wg.Wait()
 }
 
+// mqtt connection 재연결
 func connLostHandler(c mqtt.Client, err error) {
 	defer func() {
 		if r := recover(); r != nil {
