@@ -5,9 +5,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -24,8 +26,27 @@ var redisserver string
 var mqttserver string
 var influxdb string
 
+type mqMessage struct {
+	influxClient client.Client
+	redisClient  *redis.Client
+	Site         string
+	Time         float64            `json:"t"`
+	ID           string             `json:"i"`
+	Mesure       map[string]float64 `json:"m"`
+}
+
 func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *redis.Client) {
-	go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
+	mqMsg := new(mqMessage)
+
+	if err := json.Unmarshal(msg.Payload(), &mqMsg); err != nil {
+		panic(err)
+	}
+	mqMsg.Site = strings.Split(msg.Topic(), "/")[1]
+	mqMsg.influxClient = influxClient
+	mqMsg.redisClient = redisClient
+	fmt.Println("message to struct ->", mqMsg)
+
+	//go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
 }
 
 func main() {
@@ -84,7 +105,8 @@ func runJob() {
 		SetClientID("group-two").
 		SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(msg, influxClient, redisClient)
+			go messageHandler(msg, influxClient, redisClient)
+			//go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
 		}).
 		SetConnectionLostHandler(connLostHandler)
 
@@ -97,7 +119,8 @@ func runJob() {
 		//you may not receive any message
 		if token := c.Subscribe("ms/#", 0, func(c mqtt.Client, msg mqtt.Message) {
 			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
-			messageHandler(msg, influxClient, redisClient)
+			go messageHandler(msg, influxClient, redisClient)
+			//go influxPut(influxClient, redisClient, msg.Payload(), msg.Topic())
 		}); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 		}
