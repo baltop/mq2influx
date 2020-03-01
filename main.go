@@ -10,6 +10,7 @@ import (
 	"log"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -43,7 +44,6 @@ func messageHandler(msg mqtt.Message, influxClient client.Client, redisClient *r
 	mqMsg.Site = strings.Split(msg.Topic(), "/")[1]
 	mqMsg.influxClient = influxClient
 	mqMsg.redisClient = redisClient
-	fmt.Println("message to struct ->", mqMsg)
 
 	influxPut(mqMsg)
 }
@@ -61,18 +61,18 @@ func main() {
 	mqttserver = config.String("mqttserver", "tcp://192.168.0.101:1883")
 	influxdb = config.String("influxdb", "http://192.168.0.101:8086")
 
-	for {
-		runJob()
-		// 주로 통신에러일 경우 서버가 재기동할때까지..
-		time.Sleep(600 * time.Second)
-		fmt.Println("restart......")
-	}
+	// for {
+	runJob()
+	// 주로 통신에러일 경우 서버가 재기동할때까지..
+	// time.Sleep(600 * time.Second)
+	fmt.Println("restart......")
+	// }
 }
 
 func runJob() {
 	// panic 발생시 리커버하고 메인으로 돌아감.
 	defer func() {
-		fmt.Println("runJob defer function called.")
+		//fmt.Println("runJob defer function called.")
 		if r := recover(); r != nil {
 			fmt.Println("Recovered in runJob", r)
 		}
@@ -83,10 +83,10 @@ func runJob() {
 		Addr: influxdb,
 	})
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
+		//log.Fatal(err)
 	}
 	defer influxClient.Close()
-	println("influx connected")
 
 	// redis client connection pool
 	redisClient := redis.NewClient(&redis.Options{
@@ -97,54 +97,45 @@ func runJob() {
 	pong, err := redisClient.Ping().Result()
 	fmt.Println("redis connection start status", pong)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
+		//log.Fatal(err)
 	}
-	println("redis connected")
 
 	// mqtt 서버 접속 옵션
 	opts := mqtt.NewClientOptions().
 		AddBroker(mqttserver).
 		SetClientID("group-two").
-		// SetDefaultPublishHandler(func(c mqtt.Client, msg mqtt.Message) {
-		// 	go messageHandler(msg, influxClient, redisClient)
-		// }).
+		SetAutoReconnect(true).
+		SetClientID("influxclient").
+		SetKeepAlive(5 * time.Second).
+		SetMaxReconnectInterval(20 * time.Second).
 		SetConnectionLostHandler(connLostHandler)
 
-	//set OnConnect handler as anonymous function
+	var wg sync.WaitGroup
+	wg.Add(1)
 	//after connected, subscribe to topic
 	opts.OnConnect = func(c mqtt.Client) {
-		fmt.Printf("Client connected, subscribing to: ms/*\n")
-
-		//Subscribe here, otherwise after connection lost,
-		//you may not receive any message
 		if token := c.Subscribe("ms/#", 0, func(c mqtt.Client, msg mqtt.Message) {
-			// call back 함수에 세션을 넘겨 주기 위해서 anonymous func를 만들고 session을 넘겨준다.
+			fmt.Println("onconnect subscribe", msg.Topic())
 			go messageHandler(msg, influxClient, redisClient)
-
 		}); token.Wait() && token.Error() != nil {
-			fmt.Println(token.Error())
+			fmt.Println("mqtt sub error ", token.Error())
+			wg.Done()
 		}
 	}
 
-	//create and start a client using the above ClientOptions
 	c := mqtt.NewClient(opts)
 	if token := c.Connect(); token.Wait() && token.Error() != nil {
-		log.Println(token.Error())
+		log.Println("mqtt initial connect error ", token.Error())
 	}
+
+	fmt.Println("the last line-1")
+	wg.Wait()
+	fmt.Println("the last line")
 }
 
 // mqtt connection 재연결
 func connLostHandler(c mqtt.Client, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Println("Recovered in connLostHandler", r)
-		}
-	}()
 	fmt.Printf("Connection lost, reason: %v\n", err)
-ERROR1:
-	if token := c.Connect(); token.Wait() && token.Error() != nil {
-		time.Sleep(20 * time.Second)
-		goto ERROR1
-	}
-	fmt.Printf("reconnect!!")
+
 }

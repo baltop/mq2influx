@@ -48,12 +48,10 @@ func influxPut(mqMsg *mqMessage) {
 		fields["m"] = int(val)
 
 		// redis에서 이장치의 모델을 가져온다.
-		modelID, err := mqMsg.redisClient.Get(mqMsg.ID).Result()
-		if err != nil {
-			log.Println(err)
-		}
-		fmt.Println("model id is ->[", modelID, "]")
+		modelID, _ := mqMsg.redisClient.Get(mqMsg.ID).Result()
+
 		if modelID != "" {
+			fmt.Println("model id is ->[", modelID, "]")
 			// 에러나 범위를 벗어난 값을 미리 설정된 모델의 값과 비교하여 이벤트 처리
 			checkEvent(mqMsg, modelID, key, int(val))
 			// 여기서는 끝이지만 이벤트 서버에서 위 메시지를 sub하여 관련 처리를 함.
